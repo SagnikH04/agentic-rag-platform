@@ -7,7 +7,8 @@ ENV PYTHONPATH=/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential libgomp1 tesseract-ocr && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN useradd --create-home --uid 10001 appuser && mkdir -p /data && chown -R appuser:appuser /app /data
+RUN useradd --create-home --uid 10001 appuser && mkdir -p /data/uploads && chown -R appuser:appuser /app /data
 USER appuser

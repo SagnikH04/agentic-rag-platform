@@ -5,6 +5,7 @@ from collections import defaultdict
 from rank_bm25 import BM25Okapi
 from sqlalchemy import select
 
+from app.core.cache import cached_json, knowledge_revision, redis_client, retrieval_key, set_json
 from app.core.config import settings
 from app.core.db import Chunk, Document, SessionLocal
 from app.models.schemas import Citation
@@ -51,13 +52,13 @@ def _normalize(scores: dict[str, float]) -> dict[str, float]:
     return {key: (score - low) / (high - low) for key, score in scores.items()}
 
 
-async def _load_sparse_rows(filters: dict):
+async def _load_sparse_rows(filters: dict, workspace_id: str):
     async with SessionLocal() as session:
         rows = (
             await session.execute(
                 select(Chunk, Document)
                 .join(Document, Chunk.document_id == Document.id)
-                .where(Document.status == "indexed")
+                .where(Document.status == "indexed", Document.workspace_id == workspace_id)
                 .order_by(Chunk.created_at.desc())
                 .limit(settings.sparse_candidate_limit)
             )
@@ -69,17 +70,56 @@ async def _load_sparse_rows(filters: dict):
     ]
 
 
-async def hybrid_search(question: str, top_k: int, filters: dict | None = None) -> list[Citation]:
+async def _citations_from_ids(chunk_ids: list[str], scores: dict[str, float], workspace_id: str) -> list[Citation]:
+    if not chunk_ids:
+        return []
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(Chunk, Document)
+                .join(Document, Chunk.document_id == Document.id)
+                .where(Chunk.workspace_id == workspace_id, Chunk.id.in_(chunk_ids), Document.status == "indexed")
+            )
+        ).all()
+    by_id = {chunk.id: (chunk, document) for chunk, document in rows}
+    citations = []
+    for chunk_id in chunk_ids:
+        if chunk_id not in by_id:
+            continue
+        chunk, document = by_id[chunk_id]
+        citations.append(
+            Citation(
+                document_id=document.id,
+                chunk_id=chunk.id,
+                score=float(scores.get(chunk.id, 0.0)),
+                text=chunk.text,
+                metadata={**(document.doc_metadata or {}), **(chunk.chunk_metadata or {})},
+                source=document.source,
+                content_type=document.content_type,
+            )
+        )
+    return citations
+
+
+async def hybrid_search(question: str, top_k: int, filters: dict | None = None, workspace_id: str = "default") -> list[Citation]:
     filters = filters or {}
+    redis = await redis_client()
+    revision = await knowledge_revision(redis, workspace_id)
+    cache_key = retrieval_key(workspace_id, revision, question, filters, top_k)
+    cached = await cached_json(redis, cache_key)
+    if cached:
+        await redis.aclose()
+        return await _citations_from_ids(cached["chunk_ids"], cached.get("scores", {}), workspace_id)
     candidate_k = max(top_k * 4, settings.retrieval_candidate_k)
     embedding_task = asyncio.create_task(embed_texts_async([question]))
-    sparse_rows_task = asyncio.create_task(_load_sparse_rows(filters))
+    sparse_rows_task = asyncio.create_task(_load_sparse_rows(filters, workspace_id))
     query_vector = (await embedding_task)[0]
-    dense_hits_task = asyncio.create_task(search_vectors(query_vector, candidate_k, filters))
+    dense_hits_task = asyncio.create_task(search_vectors(query_vector, candidate_k, filters, workspace_id))
     rows = await sparse_rows_task
     dense_hits = await dense_hits_task
 
     if not rows:
+        await redis.aclose()
         return []
 
     records = {
@@ -158,28 +198,11 @@ async def hybrid_search(question: str, top_k: int, filters: dict | None = None) 
         selected.append(citation)
         if len(selected) >= top_k:
             break
+    await set_json(
+        redis,
+        cache_key,
+        {"chunk_ids": [item.chunk_id for item in selected], "scores": {item.chunk_id: item.score for item in selected}},
+        settings.retrieval_cache_ttl_seconds,
+    )
+    await redis.aclose()
     return selected
-
-    async with SessionLocal() as session:
-        rows = (await session.execute(select(Chunk).limit(5000))).scalars().all()
-
-    corpus = [tokenize(row.text) for row in rows]
-    bm25 = BM25Okapi(corpus) if corpus else None
-    sparse_scores = bm25.get_scores(tokenize(question)) if bm25 else []
-    sparse_by_id = {rows[i].id: float(score) for i, score in enumerate(sparse_scores)}
-
-    merged = {}
-    for hit in dense_hits:
-        payload = hit.payload or {}
-        chunk_id = str(payload.get("chunk_id"))
-        dense_score = float(hit.score)
-        sparse_score = sparse_by_id.get(chunk_id, 0.0)
-        merged[chunk_id] = Citation(
-            document_id=str(payload.get("document_id")),
-            chunk_id=chunk_id,
-            score=0.75 * dense_score + 0.25 * sparse_score,
-            text=str(payload.get("text", "")),
-            metadata=payload.get("metadata", {}),
-        )
-
-    return sorted(merged.values(), key=lambda item: item.score, reverse=True)[:top_k]

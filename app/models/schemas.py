@@ -64,6 +64,7 @@ class Citation(BaseModel):
 
 
 class QueryResponse(BaseModel):
+    status: str = "answered"
     answer: str
     citations: list[Citation]
     confidence: float
@@ -71,6 +72,7 @@ class QueryResponse(BaseModel):
     retrieval_ms: float
     session_id: str
     safety_flags: list[str] = Field(default_factory=list)
+    trace: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DocumentStatusResponse(BaseModel):
@@ -90,6 +92,7 @@ class DeleteResponse(BaseModel):
 
 class IngestionMessage(BaseModel):
     job_id: str
+    workspace_id: str
     source: str
     content_type: ContentType
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -12,8 +12,8 @@ INJECTION_PATTERNS = (
 )
 
 
-async def retrieve_documents(question: str, top_k: int, filters: dict) -> list[Citation]:
-    return await hybrid_search(question.strip(), top_k, filters)
+async def retrieve_documents(question: str, top_k: int, filters: dict, workspace_id: str) -> list[Citation]:
+    return await hybrid_search(question.strip(), top_k, filters, workspace_id)
 
 
 def verify_citations(answer: str, citations: list[Citation]) -> float:

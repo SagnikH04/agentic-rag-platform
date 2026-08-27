@@ -8,9 +8,24 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str
     redis_url: str
-    kafka_bootstrap_servers: str
+    kafka_bootstrap_servers: str = "kafka:9092"
     qdrant_url: str
     otel_exporter_otlp_endpoint: str | None = None
+    groq_api_key: str | None = None
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "qwen/qwen3.8-27b"
+    groq_prompt_version: str = "2026-08-27"
+    groq_timeout_seconds: float = 60.0
+    groq_max_tool_rounds: int = 2
+    answer_cache_ttl_seconds: int = 300
+    retrieval_cache_ttl_seconds: int = 900
+    embedding_cache_ttl_seconds: int = 604_800
+    queue_backend: str = "redis"
+    redis_stream_ingest: str = "documents.ingest"
+    redis_stream_group: str = "ingestion-workers"
+    redis_stream_consumer: str = "worker-1"
+    workspace_cookie_name: str = "rag_workspace"
+    workspace_cookie_secret: str = "dev-only-change-me"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     vector_size: int = 384
     embedding_batch_size: int = 32
@@ -33,7 +48,7 @@ class Settings(BaseSettings):
     retry_poll_seconds: float = 1.0
     outbox_poll_seconds: float = 1.0
     worker_max_poll_interval_ms: int = 1_800_000
-    cors_origins: str = "http://localhost:3000,http://localhost:8000"
+    cors_origins: str = "http://localhost:5173,http://localhost:8000"
 
     @property
     def allowed_domains(self) -> tuple[str, ...]:

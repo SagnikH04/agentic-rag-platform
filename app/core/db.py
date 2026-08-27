@@ -19,9 +19,10 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), index=True, default="default")
     external_id: Mapped[str | None] = mapped_column(String(256), index=True, nullable=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
-    source_fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     content_type: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
@@ -39,6 +40,7 @@ class Chunk(Base):
     __table_args__ = (UniqueConstraint("document_id", "chunk_index", name="uq_chunk_document_index"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), index=True, default="default")
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     chunk_index: Mapped[int] = mapped_column(Integer)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
@@ -58,6 +60,20 @@ class OutboxEvent(Base):
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class QueryRun(Base):
+    __tablename__ = "query_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), index=True)
+    session_id: Mapped[str] = mapped_column(String(256), index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_status: Mapped[str] = mapped_column(String(32), default="running")
+    citations: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    trace: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -25,7 +25,7 @@ async def ensure_collection():
             collection_name=COLLECTION,
             vectors_config=VectorParams(size=settings.vector_size, distance=Distance.COSINE),
         )
-    for field in ("document_id", "content_type"):
+    for field in ("workspace_id", "document_id", "content_type"):
         try:
             await client.create_payload_index(
                 collection_name=COLLECTION,
@@ -49,28 +49,30 @@ async def upsert_chunks(points: list[dict]):
     )
 
 
-async def delete_document_vectors(document_id: str) -> None:
+async def delete_document_vectors(document_id: str, workspace_id: str | None = None) -> None:
     await ensure_collection()
+    must = [FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+    if workspace_id:
+        must.append(FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)))
     await client.delete(
         collection_name=COLLECTION,
-        points_selector=FilterSelector(
-            filter=Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))])
-        ),
+        points_selector=FilterSelector(filter=Filter(must=must)),
         wait=True,
     )
 
 
-async def search_vectors(vector: list[float], top_k: int, filters: dict | None = None):
+async def search_vectors(vector: list[float], top_k: int, filters: dict | None = None, workspace_id: str | None = None):
     await ensure_collection()
-    query_filter = None
+    conditions = []
+    if workspace_id:
+        conditions.append(FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)))
     if filters:
-        conditions = [
+        conditions.extend(
             FieldCondition(key=f"metadata.{key}", match=MatchValue(value=value))
             for key, value in filters.items()
             if isinstance(value, (str, int, float, bool))
-        ]
-        if conditions:
-            query_filter = Filter(must=conditions)
+        )
+    query_filter = Filter(must=conditions) if conditions else None
 
     return await client.search(
         collection_name=COLLECTION,
