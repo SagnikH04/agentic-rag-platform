@@ -1,0 +1,24 @@
+# Run with the base stack: docker compose -p agentic-rag-integration -f docker-compose.yml -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from integration
+services:
+  integration:
+    build:
+      context: .
+      args:
+        INSTALL_TEST_DEPS: "true"
+    command: pytest -m integration -q
+    env_file: .env
+    environment:
+      RUN_INTEGRATION: "1"
+      API_BASE_URL: http://api:8000
+      QUEUE_BACKEND: kafka
+      DATABASE_URL: postgresql+asyncpg://rag:rag@postgres:5432/rag
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      QDRANT_URL: http://qdrant:6333
+      LOCAL_INGESTION_ROOT: /data
+    depends_on:
+      api:
+        condition: service_started
+      worker:
+        condition: service_started
+    restart: "no"

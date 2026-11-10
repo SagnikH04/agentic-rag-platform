@@ -115,6 +115,20 @@ async def _publish(producer: AIOKafkaProducer, topic: str, message: IngestionMes
     await producer.send_and_wait(topic, message.model_dump_json().encode(), key=message.document_id.encode())
 
 
+async def _publish_malformed_event(producer: AIOKafkaProducer, raw_value: bytes, error: Exception) -> None:
+    """Quarantine poison records that cannot be parsed as ingestion messages."""
+    payload = {
+        "error": "malformed_ingestion_event",
+        "exception": type(error).__name__,
+        "raw_event_sha256": hashlib.sha256(raw_value).hexdigest(),
+    }
+    await producer.send_and_wait(
+        settings.kafka_dlq_topic,
+        json.dumps(payload, separators=(",", ":")).encode(),
+        key=payload["raw_event_sha256"].encode(),
+    )
+
+
 async def _schedule_retry(message: IngestionMessage, error: Exception) -> None:
     """Persist delay in the outbox; never sleep in a Kafka consumer loop."""
     delay = min(settings.retry_base_seconds * (2 ** message.attempt), settings.retry_max_seconds)
@@ -150,9 +164,15 @@ async def _consume_kafka() -> None:
                     else:
                         await _state(redis, failed, status="failed", stage="dead_lettered", progress=0, error=str(exc))
                         await _publish(producer, settings.kafka_dlq_topic, failed)
-                except Exception:
-                    logger.exception("Unable to make failed Kafka event durable")
-                    continue  # Do not commit: Kafka will replay the original event.
+                except Exception as handling_error:
+                    # A malformed payload has no job id/version to retry. Send
+                    # a small, non-sensitive diagnostic record to the DLQ so it
+                    # cannot poison the partition forever.
+                    try:
+                        await _publish_malformed_event(producer, record.value, handling_error)
+                    except Exception:
+                        logger.exception("Unable to make failed Kafka event durable")
+                        continue  # Do not commit: Kafka will replay the original event.
             await consumer.commit()
     finally:
         await consumer.stop(); await producer.stop(); await redis.aclose()

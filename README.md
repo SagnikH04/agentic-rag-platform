@@ -16,6 +16,21 @@ Open the UI at `http://localhost:5173`.
 
 The app still boots without `GROQ_API_KEY`; ingestion and indexing work, and chat returns a clear API-key-required state. GroqCloud API calls require internet access and a valid GroqCloud API key.
 
+## Run the real integration suite
+
+The normal CI suite remains unit-focused. The separate integration profile
+starts disposable Kafka, PostgreSQL, Redis, Qdrant, the FastAPI service, and
+the ingestion worker, then verifies an HTTP request flows through the durable
+outbox and Kafka into both PostgreSQL and Qdrant.
+
+```powershell
+docker compose -p agentic-rag-integration -f docker-compose.yml -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from integration
+docker compose -p agentic-rag-integration -f docker-compose.yml -f docker-compose.integration.yml down -v
+```
+
+It is opt-in (`RUN_INTEGRATION=1`) and covers successful ingest/delete,
+duplicate delivery, and malformed-record DLQ handling.
+
 ## Local Architecture
 
 ```mermaid
@@ -91,7 +106,7 @@ have not yet been performed.
 docker compose -f docker-compose.yml -f docker-compose.distributed.yml up --build
 ```
 
-This starts Kafka and an OTel collector, but the current local worker defaults to Redis Streams.
+This starts Kafka and an OTel collector; Kafka remains the worker's durable ingestion transport.
 
 ## Notes
 

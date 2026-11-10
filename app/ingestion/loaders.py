@@ -139,7 +139,24 @@ def _extract_text_file(path: Path, content_type: str) -> LoadedDocument:
 def _limit(loaded: LoadedDocument) -> LoadedDocument:
     if len(loaded.text) <= settings.max_document_chars:
         return loaded
-    return LoadedDocument(loaded.text[:settings.max_document_chars], {**loaded.metadata, "truncated": True}, loaded.segments)
+    limited_text = loaded.text[:settings.max_document_chars]
+    if not loaded.segments:
+        return LoadedDocument(limited_text, {**loaded.metadata, "truncated": True})
+
+    # The worker deliberately chunks source-location segments instead of the
+    # flattened text.  Truncating only ``text`` would therefore still index
+    # the complete PDF/slide deck.  Preserve segment metadata while applying
+    # the same character budget to the representation the worker consumes.
+    remaining = settings.max_document_chars
+    segments: list[tuple[str, dict]] = []
+    for text, location in loaded.segments:
+        if remaining <= 0:
+            break
+        piece = text[:remaining]
+        if piece:
+            segments.append((piece, location))
+            remaining -= len(piece)
+    return LoadedDocument(limited_text, {**loaded.metadata, "truncated": True}, tuple(segments))
 
 
 async def load_source(source: str, content_type: str) -> LoadedDocument:
