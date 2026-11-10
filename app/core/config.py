@@ -20,7 +20,14 @@ class Settings(BaseSettings):
     answer_cache_ttl_seconds: int = 300
     retrieval_cache_ttl_seconds: int = 900
     embedding_cache_ttl_seconds: int = 604_800
-    queue_backend: str = "redis"
+    # Kafka is the durable ingestion transport. Redis Streams remains available
+    # only for existing local installations while they migrate.
+    queue_backend: str = "kafka"
+    kafka_ingest_topic: str = "documents.ingest"
+    kafka_retry_topic: str = "documents.ingest.retry"
+    kafka_dlq_topic: str = "documents.ingest.dlq"
+    kafka_consumer_group: str = "ingestion-workers"
+    kafka_consumer_concurrency: int = 2
     redis_stream_ingest: str = "documents.ingest"
     redis_stream_group: str = "ingestion-workers"
     redis_stream_consumer: str = "worker-1"
@@ -32,13 +39,19 @@ class Settings(BaseSettings):
     chunk_size: int = 900
     chunk_overlap: int = 140
     max_document_chars: int = 5_000_000
+    max_upload_bytes: int = 20_000_000
     max_chunks_per_document: int = 10_000
     web_fetch_max_bytes: int = 20_000_000
     allowed_web_domains: str = ""
     local_ingestion_root: str = "/data"
     retrieval_candidate_k: int = 48
-    sparse_candidate_limit: int = 10_000
+    # A candidate count, not a corpus limit. Sparse retrieval is performed by
+    # PostgreSQL full-text search instead of rebuilding BM25 per request.
+    sparse_candidate_limit: int = 200
     max_chunks_per_document_in_response: int = 2
+    retrieval_mode: str = "hybrid"  # dense, sparse, or hybrid
+    reranker_model: str | None = None
+    reranker_candidate_k: int = 32
     session_ttl_seconds: int = 86_400
     session_max_turns: int = 8
     job_ttl_seconds: int = 604_800

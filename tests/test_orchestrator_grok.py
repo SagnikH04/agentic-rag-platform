@@ -7,6 +7,9 @@ class FakeRedis:
     async def get(self, key):
         return None
 
+    async def set(self, *args, **kwargs):
+        return True
+
     def lock(self, *args, **kwargs):
         return self
 
@@ -29,7 +32,10 @@ def test_missing_groq_key_returns_clear_response(monkeypatch):
     orchestrator = AgentOrchestrator()
     orchestrator.client = None
     orchestrator.memory = FakeMemory()
-    monkeypatch.setattr("app.agents.orchestrator.redis_client", lambda: FakeRedis())
+    async def fake_redis_client():
+        return FakeRedis()
+
+    monkeypatch.setattr("app.agents.orchestrator.redis_client", fake_redis_client)
 
     response = asyncio.run(orchestrator.answer("What is indexed?", "session", {}, 3, "workspace"))
 

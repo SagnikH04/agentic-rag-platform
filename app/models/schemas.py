@@ -92,10 +92,14 @@ class DeleteResponse(BaseModel):
 
 class IngestionMessage(BaseModel):
     job_id: str
+    # ``document_id`` is explicit for interoperability; it is currently equal
+    # to job_id because a document has one durable ingestion job.
+    document_id: str
     workspace_id: str
-    source: str
+    source_uri: str
     content_type: ContentType
     metadata: dict[str, Any] = Field(default_factory=dict)
     force_reindex: bool = False
+    document_version: int = 1
     attempt: int = 0
     enqueued_at: datetime = Field(default_factory=datetime.utcnow)

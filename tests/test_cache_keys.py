@@ -24,3 +24,9 @@ def test_answer_cache_key_changes_with_groq_model(monkeypatch):
     monkeypatch.setattr(settings, "groq_model", "llama-3.3-70b-versatile")
     second = answer_key("workspace-a", 1, "history", "Question?")
     assert first != second
+
+
+def test_answer_cache_key_scopes_filters_and_top_k():
+    base = answer_key("workspace", 1, "history", "question", {"department": "legal"}, 3)
+    assert base != answer_key("workspace", 1, "history", "question", {"department": "sales"}, 3)
+    assert base != answer_key("workspace", 1, "history", "question", {"department": "legal"}, 8)

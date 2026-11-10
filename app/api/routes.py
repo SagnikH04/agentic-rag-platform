@@ -1,7 +1,7 @@
 import asyncio
 import json
-import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
@@ -38,8 +38,8 @@ def _v1(path: str) -> str:
     return f"/v1{path}"
 
 
-@router.post(_v1("/documents/ingest"), response_model=IngestResponse)
-@router.post("/documents/ingest", response_model=IngestResponse)
+@router.post(_v1("/documents/ingest"), response_model=IngestResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/documents/ingest", response_model=IngestResponse, status_code=status.HTTP_202_ACCEPTED)
 async def ingest_document(payload: IngestRequest, request: Request):
     result = await enqueue_ingestion(payload, workspace_from_request(request))
     return IngestResponse(
@@ -49,16 +49,36 @@ async def ingest_document(payload: IngestRequest, request: Request):
     )
 
 
-@router.post(_v1("/documents/upload"), response_model=IngestResponse)
+_UPLOAD_TYPES = {
+    ".pdf": "pdf", ".docx": "office", ".pptx": "office", ".xlsx": "office", ".xlsm": "office",
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image", ".tiff": "image",
+    ".txt": "text", ".md": "markdown", ".markdown": "markdown", ".csv": "csv", ".json": "json",
+}
+
+
+@router.post(_v1("/documents/upload"), response_model=IngestResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(request: Request, file: UploadFile = File(...), force_reindex: bool = False):
     workspace_id = workspace_from_request(request)
     suffix = Path(file.filename or "").suffix.lower()
-    kind = "pdf" if suffix == ".pdf" else "office" if suffix in {".docx", ".pptx", ".xlsx", ".xlsm"} else "image" if suffix in {".png", ".jpg", ".jpeg", ".webp", ".tiff"} else "text"
+    kind = _UPLOAD_TYPES.get(suffix)
+    if kind is None:
+        raise HTTPException(status_code=415, detail="unsupported file type")
     target_dir = UPLOAD_ROOT / workspace_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{uuid.uuid4()}{suffix or '.txt'}"
-    with target.open("wb") as handle:
-        shutil.copyfileobj(file.file, handle)
+    total = 0
+    try:
+        with target.open("xb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > settings.max_upload_bytes:
+                    raise HTTPException(status_code=413, detail="file exceeds MAX_UPLOAD_BYTES")
+                await asyncio.to_thread(handle.write, chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
     payload = IngestRequest(
         source=str(target),
         content_type=kind,
@@ -86,7 +106,7 @@ async def list_documents(request: Request):
             progress=document.progress,
             attempts=document.attempts,
             error=document.error_message,
-            metadata={**(document.doc_metadata or {}), "source": document.source, "content_type": document.content_type},
+            metadata={**(document.doc_metadata or {}), "source": (document.doc_metadata or {}).get("file_name") or "inline source", "content_type": document.content_type},
         )
         for document in documents
     ]
@@ -125,12 +145,17 @@ async def delete_document(job_id: str, request: Request):
         document = await session.get(Document, job_id)
         if document is None or document.workspace_id != workspace_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document was not found")
-        await delete_document_vectors(job_id, workspace_id)
-        await session.execute(delete(Chunk).where(Chunk.document_id == job_id))
+        # Commit the tombstone first. Delayed workers fence on status/version
+        # and cannot resurrect a document while vector cleanup is in flight.
         document.status = "deleted"
         document.pipeline_stage = "deleted"
         document.progress = 100
+        document.version += 1
+        document.deleted_at = datetime.now(timezone.utc)
+        await session.execute(delete(Chunk).where(Chunk.document_id == job_id))
         await session.commit()
+
+    await delete_document_vectors(job_id, workspace_id)
 
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:

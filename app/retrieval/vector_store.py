@@ -25,7 +25,7 @@ async def ensure_collection():
             collection_name=COLLECTION,
             vectors_config=VectorParams(size=settings.vector_size, distance=Distance.COSINE),
         )
-    for field in ("workspace_id", "document_id", "content_type"):
+    for field in ("workspace_id", "document_id", "content_type", "document_version"):
         try:
             await client.create_payload_index(
                 collection_name=COLLECTION,
@@ -49,11 +49,13 @@ async def upsert_chunks(points: list[dict]):
     )
 
 
-async def delete_document_vectors(document_id: str, workspace_id: str | None = None) -> None:
+async def delete_document_vectors(document_id: str, workspace_id: str | None = None, document_version: int | None = None) -> None:
     await ensure_collection()
     must = [FieldCondition(key="document_id", match=MatchValue(value=document_id))]
     if workspace_id:
         must.append(FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)))
+    if document_version is not None:
+        must.append(FieldCondition(key="document_version", match=MatchValue(value=document_version)))
     await client.delete(
         collection_name=COLLECTION,
         points_selector=FilterSelector(filter=Filter(must=must)),
@@ -74,10 +76,13 @@ async def search_vectors(vector: list[float], top_k: int, filters: dict | None =
         )
     query_filter = Filter(must=conditions) if conditions else None
 
-    return await client.search(
+    # qdrant-client 1.15 replaced ``search`` with ``query_points``. The
+    # newer method returns a wrapper, so retain this function's list result.
+    response = await client.query_points(
         collection_name=COLLECTION,
-        query_vector=vector,
+        query=vector,
         query_filter=query_filter,
         limit=top_k,
         with_payload=True,
     )
+    return response.points

@@ -42,7 +42,7 @@ def retrieval_key(workspace_id: str, revision: int, question: str, filters: dict
     )
 
 
-def answer_key(workspace_id: str, revision: int, session_hash: str, question: str) -> str:
+def answer_key(workspace_id: str, revision: int, session_hash: str, question: str, filters: dict | None = None, top_k: int | None = None) -> str:
     return "ans:" + stable_hash(
         {
             "workspace": workspace_id,
@@ -51,6 +51,10 @@ def answer_key(workspace_id: str, revision: int, session_hash: str, question: st
             "prompt": settings.groq_prompt_version,
             "session": session_hash,
             "question": normalize_text(question),
+            "filters": filters or {},
+            "top_k": top_k,
+            "retrieval_mode": settings.retrieval_mode,
+            "embedding_model": settings.embedding_model,
         }
     )
 

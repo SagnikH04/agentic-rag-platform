@@ -1,6 +1,6 @@
 # RAG Workspace
 
-Local-first agentic RAG workspace with FastAPI, Redis Streams, Postgres, Qdrant, GroqCloud, and a React/Vite UI.
+Local-first agentic RAG workspace with FastAPI, Kafka, Redis, Postgres, Qdrant, GroqCloud, and a React/Vite UI.
 
 ## Run Locally
 
@@ -21,16 +21,22 @@ The app still boots without `GROQ_API_KEY`; ingestion and indexing work, and cha
 ```mermaid
 flowchart LR
   UI[React + Vite UI] --> API[FastAPI]
-  API --> R[(Redis)]
-  R --> Cache[Embedding, retrieval, answer cache]
-  R --> Queue[Redis Streams]
-  Queue --> W[Worker]
+  API --> P[(Postgres + transactional outbox)]
+  API --> R[(Redis cache + session memory)]
+  P --> K[Kafka ingestion topic]
+  K --> W[Worker]
   W --> P[(Postgres)]
   W --> Q[(Qdrant)]
   API --> M[GroqCloud Chat API]
 ```
 
-Redis Streams are the default queue backend for local development. Kafka lives in `docker-compose.distributed.yml` for future production-scale experiments, not as a local prerequisite.
+Kafka is the default ingestion queue. Accepted jobs are committed with an outbox
+record in PostgreSQL, then a dispatcher publishes them to Kafka. A crash between
+those steps is recoverable: unpublished rows remain available for retry. The
+worker commits Kafka offsets only after successful indexing or after it has
+durably sent the event to the retry/DLQ topic. Processing is at-least-once, with
+document-version fencing and deterministic chunk IDs for idempotency. Redis
+Streams is no longer a supported worker mode.
 
 ## Product Surface
 
@@ -58,6 +64,26 @@ The server validates citations against retrieved chunk IDs before returning the 
 - Retrieval: workspace, knowledge revision, question, filters, and `top_k`.
 - Answers: workspace, knowledge revision, model, prompt version, bounded history hash, and question.
 - Knowledge revision increments after enqueue, successful indexing, and deletion.
+- Answer keys also include filters, `top_k`, retrieval mode, and embedding model.
+
+## Retrieval and source limitations
+
+Sparse retrieval uses PostgreSQL full-text search and dense retrieval uses
+Qdrant. Their ranked candidate lists are fused with reciprocal-rank fusion; the
+app does not describe its lexical heuristic as a Cross-Encoder. PDF chunks keep
+page metadata, and Office chunks retain slide or sheet metadata where available.
+Scanned PDFs require a separately configured OCR pipeline; image OCR failures
+are explicit failures rather than fabricated placeholder text.
+
+## Current limitations
+
+The Groq orchestration remains a bounded retrieval tool loop; semantic
+claim-verification, query decomposition, and optional Cross-Encoder reranking
+need an evaluated provider/model before they can be represented as implemented.
+Web URL validation rejects private resolved addresses and validates redirect
+targets, but production deployments should also enforce outbound network policy
+to protect against DNS rebinding. Benchmark scripts and 25K+ integration runs
+have not yet been performed.
 
 ## Optional Distributed Profile
 

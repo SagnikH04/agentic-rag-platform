@@ -41,6 +41,7 @@ function App() {
   const [trace, setTrace] = useState<Array<Record<string, unknown>>>([]);
   const [busy, setBusy] = useState(false);
   const [paste, setPaste] = useState("");
+  const [error, setError] = useState("");
 
   async function loadSources() {
     const response = await fetch(`${API}/v1/documents`, { credentials: "include" });
@@ -89,24 +90,27 @@ function App() {
   async function upload(file: File) {
     const data = new FormData();
     data.append("file", file);
-    await fetch(`${API}/v1/documents/upload`, { method: "POST", credentials: "include", body: data });
+    const response = await fetch(`${API}/v1/documents/upload`, { method: "POST", credentials: "include", body: data });
+    if (!response.ok) throw new Error((await response.json()).detail || "Upload failed.");
     await loadSources();
   }
 
   async function ingestText() {
     if (!paste.trim()) return;
-    await fetch(`${API}/v1/documents/ingest`, {
+    const response = await fetch(`${API}/v1/documents/ingest`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source: paste, content_type: "text", metadata: { title: "Pasted text" } })
     });
+    if (!response.ok) throw new Error((await response.json()).detail || "Indexing request failed.");
     setPaste("");
     await loadSources();
   }
 
   async function remove(id: string) {
-    await fetch(`${API}/v1/documents/${id}`, { method: "DELETE", credentials: "include" });
+    const response = await fetch(`${API}/v1/documents/${id}`, { method: "DELETE", credentials: "include" });
+    if (!response.ok) throw new Error((await response.json()).detail || "Delete failed.");
     await loadSources();
   }
 
@@ -145,14 +149,15 @@ function App() {
         )}
         {tab === "sources" && (
           <div className="panel split">
+            {error && <p className="error">{error}</p>}
             <div>
               <label className="drop">
                 <FileUp size={24} />
                 <span>Upload PDF, Office, image, or text file</span>
-                <input type="file" onChange={(event) => event.target.files?.[0] && upload(event.target.files[0])} />
+                <input type="file" onChange={(event) => event.target.files?.[0] && upload(event.target.files[0]).catch((reason) => setError(String(reason.message || reason)))} />
               </label>
               <textarea value={paste} onChange={(event) => setPaste(event.target.value)} placeholder="Paste text to index" />
-              <button onClick={ingestText}><FileUp size={18} />Index Text</button>
+              <button onClick={() => ingestText().catch((reason) => setError(String(reason.message || reason)))}><FileUp size={18} />Index Text</button>
             </div>
             <div className="list">
               <button className="ghost" onClick={loadSources}><RefreshCcw size={16} />Refresh</button>
@@ -162,7 +167,7 @@ function App() {
                     <strong>{String(source.metadata.file_name || source.metadata.title || source.job_id)}</strong>
                     <span>{source.status} · {source.stage} · {source.progress}%</span>
                   </div>
-                  <button className="icon" onClick={() => remove(source.job_id)} title="Delete source"><Trash2 size={16} /></button>
+                  <button className="icon" onClick={() => remove(source.job_id).catch((reason) => setError(String(reason.message || reason)))} title="Delete source"><Trash2 size={16} /></button>
                 </div>
               ))}
             </div>
