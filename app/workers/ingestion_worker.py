@@ -14,13 +14,13 @@ from sqlalchemy import delete
 
 from app.core.cache import bump_knowledge_revision
 from app.core.config import settings
-from app.core.db import Chunk, Document, SessionLocal
+from app.core.db import Chunk, Document, OutboxEvent, SessionLocal
 from app.core.telemetry import configure_telemetry, tracer
 from app.ingestion.loaders import chunk_text, load_source
 from app.ingestion.state import set_job_state
 from app.models.schemas import IngestionMessage
 from app.retrieval.embeddings import embed_texts_async
-from app.retrieval.vector_store import delete_document_vectors, upsert_chunks
+from app.retrieval.vector_store import delete_document_vectors, delete_obsolete_document_vectors, upsert_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ async def _replace_document_index(message: IngestionMessage, chunks: list[tuple[
         doc.content_hash, doc.error_message = content_hash, None
         doc.doc_metadata = {**message.metadata, "ingestion": loader_metadata, "document_version": message.document_version}
         await session.commit()
+    await delete_obsolete_document_vectors(message.document_id, message.workspace_id, message.document_version)
     return True
 
 
@@ -114,9 +115,23 @@ async def _publish(producer: AIOKafkaProducer, topic: str, message: IngestionMes
     await producer.send_and_wait(topic, message.model_dump_json().encode(), key=message.document_id.encode())
 
 
+async def _schedule_retry(message: IngestionMessage, error: Exception) -> None:
+    """Persist delay in the outbox; never sleep in a Kafka consumer loop."""
+    delay = min(settings.retry_base_seconds * (2 ** message.attempt), settings.retry_max_seconds)
+    retry = message.model_copy(update={"attempt": message.attempt + 1})
+    async with SessionLocal() as session:
+        session.add(OutboxEvent(
+            id=str(uuid.uuid4()), topic=settings.kafka_retry_topic, message_key=retry.document_id,
+            event_payload=retry.model_dump(mode="json"),
+            available_at=datetime.now(timezone.utc) + timedelta(seconds=delay),
+        ))
+        await session.commit()
+
+
 async def _consume_kafka() -> None:
     consumer = AIOKafkaConsumer(settings.kafka_ingest_topic, settings.kafka_retry_topic, bootstrap_servers=settings.kafka_bootstrap_servers,
-        group_id=settings.kafka_consumer_group, enable_auto_commit=False, auto_offset_reset="earliest", client_id=f"{settings.app_name}-{os.getpid()}")
+        group_id=settings.kafka_consumer_group, enable_auto_commit=False, auto_offset_reset="earliest",
+        max_poll_interval_ms=settings.worker_max_poll_interval_ms, client_id=f"{settings.app_name}-{os.getpid()}")
     producer = AIOKafkaProducer(bootstrap_servers=settings.kafka_bootstrap_servers, acks="all", enable_idempotence=True)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     await consumer.start(); await producer.start()
@@ -124,20 +139,14 @@ async def _consume_kafka() -> None:
         async for record in consumer:
             try:
                 message = IngestionMessage.model_validate_json(record.value)
-                if record.topic == settings.kafka_retry_topic:
-                    not_before = message.metadata.get("retry_not_before")
-                    if not_before and datetime.fromisoformat(not_before) > datetime.now(timezone.utc):
-                        await asyncio.sleep(min((datetime.fromisoformat(not_before) - datetime.now(timezone.utc)).total_seconds(), settings.retry_max_seconds))
-                    message = message.model_copy(update={"metadata": {k: v for k, v in message.metadata.items() if k != "retry_not_before"}})
                 await process_message(message.model_dump(mode="json"), redis)
             except Exception as exc:
                 try:
                     failed = IngestionMessage.model_validate_json(record.value)
                     if failed.attempt < settings.max_retries:
-                        delay = min(settings.retry_base_seconds * (2 ** failed.attempt), settings.retry_max_seconds)
-                        retry = failed.model_copy(update={"attempt": failed.attempt + 1, "metadata": {**failed.metadata, "retry_not_before": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()}})
+                        retry = failed.model_copy(update={"attempt": failed.attempt + 1})
                         await _state(redis, retry, status="retrying", stage="retry_scheduled", progress=0, error=str(exc))
-                        await _publish(producer, settings.kafka_retry_topic, retry)
+                        await _schedule_retry(failed, exc)
                     else:
                         await _state(redis, failed, status="failed", stage="dead_lettered", progress=0, error=str(exc))
                         await _publish(producer, settings.kafka_dlq_topic, failed)

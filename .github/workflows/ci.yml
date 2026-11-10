@@ -12,6 +12,7 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       QDRANT_URL: http://localhost:6333
       WORKSPACE_COOKIE_SECRET: ci-secret
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

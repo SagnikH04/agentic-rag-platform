@@ -63,6 +63,22 @@ async def delete_document_vectors(document_id: str, workspace_id: str | None = N
     )
 
 
+async def delete_obsolete_document_vectors(document_id: str, workspace_id: str, active_version: int) -> None:
+    """Best-effort cleanup after the database atomically promotes a version."""
+    await ensure_collection()
+    await client.delete(
+        collection_name=COLLECTION,
+        points_selector=FilterSelector(filter=Filter(
+            must=[
+                FieldCondition(key="document_id", match=MatchValue(value=document_id)),
+                FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+            ],
+            must_not=[FieldCondition(key="document_version", match=MatchValue(value=active_version))],
+        )),
+        wait=True,
+    )
+
+
 async def search_vectors(vector: list[float], top_k: int, filters: dict | None = None, workspace_id: str | None = None):
     await ensure_collection()
     conditions = []
