@@ -10,6 +10,7 @@ from app.core.db import engine, init_db
 from app.core.telemetry import setup_telemetry
 from app.core.workspace import attach_workspace_cookie, workspace_from_request
 from app.ingestion.jobs import outbox_dispatcher, publisher
+from app.ingestion.reconciliation import reconciliation_worker
 from app.retrieval.vector_store import ensure_collection
 
 
@@ -20,11 +21,13 @@ async def lifespan(_: FastAPI):
     await publisher.start()
     stop_event = asyncio.Event()
     dispatcher = asyncio.create_task(outbox_dispatcher(stop_event))
+    reconciler = asyncio.create_task(reconciliation_worker(stop_event))
     try:
         yield
     finally:
         stop_event.set()
         await dispatcher
+        await reconciler
         await publisher.stop()
         await engine.dispose()
 

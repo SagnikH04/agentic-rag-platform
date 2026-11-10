@@ -30,6 +30,10 @@ class Document(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[int] = mapped_column(Integer, default=1)
+    # ``version`` is the requested generation; retrieval uses the last fully
+    # committed generation so reindexing never withdraws known-good evidence.
+    active_version: Mapped[int] = mapped_column(Integer, default=0)
+    index_runs: Mapped[int] = mapped_column(Integer, default=0)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     doc_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -39,11 +43,12 @@ class Document(Base):
 
 class Chunk(Base):
     __tablename__ = "chunks"
-    __table_args__ = (UniqueConstraint("document_id", "chunk_index", name="uq_chunk_document_index"),)
+    __table_args__ = (UniqueConstraint("document_id", "document_version", "chunk_index", name="uq_chunk_document_version_index"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     workspace_id: Mapped[str] = mapped_column(String(128), index=True, default="default")
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    document_version: Mapped[int] = mapped_column(Integer, default=1)
     chunk_index: Mapped[int] = mapped_column(Integer)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -85,6 +90,19 @@ async def init_db():
         # This project predates migrations. Keep existing local volumes usable
         # while adding the generation fence required for safe replay/reindex.
         await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1"))
+        await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS active_version INTEGER NOT NULL DEFAULT 0"))
+        await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_runs INTEGER NOT NULL DEFAULT 0"))
         await conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL"))
+        await conn.execute(text("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS document_version INTEGER NOT NULL DEFAULT 1"))
+        await conn.execute(text("ALTER TABLE chunks DROP CONSTRAINT IF EXISTS uq_chunk_document_index"))
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE chunks ADD CONSTRAINT uq_chunk_document_version_index UNIQUE (document_id, document_version, chunk_index);
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$;
+        """))
+        # Existing indexed installations predate active_version. Their current
+        # generation is already the known-good one and must remain visible.
+        await conn.execute(text("UPDATE documents SET active_version = version WHERE status = 'indexed' AND active_version = 0"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chunks_workspace_document ON chunks (workspace_id, document_id)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chunks_text_fts ON chunks USING GIN (to_tsvector('simple', text))"))

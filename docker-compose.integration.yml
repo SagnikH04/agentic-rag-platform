@@ -16,6 +16,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       QDRANT_URL: http://qdrant:6333
       LOCAL_INGESTION_ROOT: /data
+      RECONCILIATION_POLL_SECONDS: "600"
     depends_on:
       api:
         condition: service_started

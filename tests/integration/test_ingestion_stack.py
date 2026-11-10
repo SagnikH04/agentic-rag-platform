@@ -23,7 +23,8 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.core.db import Chunk, Document, SessionLocal
 from app.models.schemas import IngestionMessage
-from app.retrieval.vector_store import COLLECTION, client as qdrant_client
+from app.ingestion.reconciliation import reconcile_once
+from app.retrieval.vector_store import COLLECTION, client as qdrant_client, delete_chunk_vectors
 
 
 pytestmark = pytest.mark.integration
@@ -73,6 +74,16 @@ async def _document_and_chunk_count(job_id: str) -> tuple[Document, int]:
         assert document is not None
         count = await session.scalar(select(func.count()).select_from(Chunk).where(Chunk.document_id == job_id))
         return document, int(count or 0)
+
+
+async def _wait_for_index_runs(job_id: str, minimum: int, timeout: float = 180.0) -> Document:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        document, _ = await _document_and_chunk_count(job_id)
+        if document.index_runs >= minimum:
+            return document
+        await asyncio.sleep(1)
+    raise AssertionError(f"worker did not process replay for {job_id}")
 
 
 @pytest.mark.asyncio
@@ -127,6 +138,7 @@ async def test_duplicate_delivery_is_idempotent(api_client: httpx.AsyncClient):
     job_id = accepted.json()["job_id"]
     await _wait_for_status(api_client, job_id, "indexed")
     document, initial_count = await _document_and_chunk_count(job_id)
+    initial_runs = document.index_runs
 
     event = IngestionMessage(
         job_id=job_id,
@@ -142,9 +154,58 @@ async def test_duplicate_delivery_is_idempotent(api_client: httpx.AsyncClient):
         await producer.send_and_wait(settings.kafka_ingest_topic, event.model_dump_json().encode(), key=job_id.encode())
     finally:
         await producer.stop()
-    await _wait_for_status(api_client, job_id, "indexed")
+    await _wait_for_index_runs(job_id, initial_runs + 1)
     _, replay_count = await _document_and_chunk_count(job_id)
     assert replay_count == initial_count
+
+
+@pytest.mark.asyncio
+async def test_force_reindex_keeps_an_active_generation_searchable(api_client: httpx.AsyncClient):
+    source = f"active-generation-{uuid.uuid4()}"
+    accepted = await api_client.post("/v1/documents/ingest", json={"source": source, "content_type": "text"})
+    job_id = accepted.json()["job_id"]
+    await _wait_for_status(api_client, job_id, "indexed")
+    initial, initial_chunks = await _document_and_chunk_count(job_id)
+
+    replacement = await api_client.post("/v1/documents/ingest", json={"source": source, "content_type": "text", "force_reindex": True})
+    assert replacement.status_code == 202
+    during_reindex, visible_chunks = await _document_and_chunk_count(job_id)
+    assert during_reindex.status == "indexed"
+    assert during_reindex.active_version >= initial.active_version
+    assert visible_chunks >= 1
+
+    await _wait_for_index_runs(job_id, initial.index_runs + 1)
+    completed, completed_chunks = await _document_and_chunk_count(job_id)
+    assert completed.active_version == completed.version
+    assert completed_chunks == initial_chunks
+
+
+@pytest.mark.asyncio
+async def test_reconciler_rebuilds_a_missing_qdrant_vector(api_client: httpx.AsyncClient):
+    accepted = await api_client.post(
+        "/v1/documents/ingest", json={"source": f"reconciliation-{uuid.uuid4()}", "content_type": "text"},
+    )
+    job_id = accepted.json()["job_id"]
+    await _wait_for_status(api_client, job_id, "indexed")
+    document, _ = await _document_and_chunk_count(job_id)
+    initial_runs = document.index_runs
+    points, _ = await qdrant_client.scroll(
+        collection_name=COLLECTION,
+        scroll_filter=Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=job_id))]),
+        limit=1,
+    )
+    assert points
+    await delete_chunk_vectors([str(points[0].id)])
+
+    result = await reconcile_once()
+    assert result["rebuilds_enqueued"] >= 1
+    await _wait_for_index_runs(job_id, initial_runs + 1)
+    repaired, _ = await qdrant_client.scroll(
+        collection_name=COLLECTION,
+        scroll_filter=Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=job_id))]),
+        limit=1,
+    )
+    assert repaired
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,20 @@
+name: integration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  durable-ingestion-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create non-secret local test environment
+        run: cp .env.example .env
+      - name: Run disposable Kafka/PostgreSQL/Redis/Qdrant integration suite
+        run: docker compose -p agentic-rag-integration -f docker-compose.yml -f docker-compose.integration.yml up --build --abort-on-container-exit --exit-code-from integration integration
+      - name: Capture service logs on failure
+        if: failure()
+        run: docker compose -p agentic-rag-integration -f docker-compose.yml -f docker-compose.integration.yml logs --no-color
+      - name: Remove disposable infrastructure
+        if: always()
+        run: docker compose -p agentic-rag-integration -f docker-compose.yml -f docker-compose.integration.yml down -v --remove-orphans

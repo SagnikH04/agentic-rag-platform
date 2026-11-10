@@ -40,7 +40,10 @@ async def _state(redis: Redis, message: IngestionMessage, *, status: str, stage:
     async with SessionLocal() as session:
         doc = await session.get(Document, message.document_id)
         if doc and doc.version == message.document_version and doc.status != "deleted":
-            doc.status, doc.pipeline_stage, doc.progress, doc.attempts = status, stage, progress, message.attempt
+            # An active generation remains searchable through a reindex. The
+            # job state in Redis still reports running/retrying to the caller.
+            doc.status = "indexed" if doc.active_version else status
+            doc.pipeline_stage, doc.progress, doc.attempts = stage, progress, message.attempt
             if error:
                 doc.error_message = error[:2000]
             elif status not in {"failed", "retrying"}:
@@ -62,7 +65,7 @@ async def _replace_document_index(message: IngestionMessage, chunks: list[tuple[
         chunk_hash = hashlib.sha256(chunk.encode()).hexdigest()
         chunk_id = _chunk_id(message.document_id, message.document_version, index, chunk_hash)
         metadata = {**message.metadata, **location, "content_type": message.content_type.value, "chunk_index": index, "document_version": message.document_version}
-        db_chunks.append(Chunk(id=chunk_id, workspace_id=message.workspace_id, document_id=message.document_id, chunk_index=index,
+        db_chunks.append(Chunk(id=chunk_id, workspace_id=message.workspace_id, document_id=message.document_id, document_version=message.document_version, chunk_index=index,
             content_hash=chunk_hash, text=chunk, chunk_metadata=metadata))
         points.append({"id": chunk_id, "vector": vector, "payload": {"workspace_id": message.workspace_id, "document_id": message.document_id,
             "chunk_id": chunk_id, "content_type": message.content_type.value, "document_version": message.document_version, "text": chunk, "metadata": metadata}})
@@ -75,9 +78,13 @@ async def _replace_document_index(message: IngestionMessage, chunks: list[tuple[
         if not doc or doc.status == "deleted" or doc.version != message.document_version:
             await delete_document_vectors(message.document_id, message.workspace_id, message.document_version)
             return False
+        # This delete and the active-version promotion commit atomically. A
+        # concurrent reader sees either all old chunks or all new chunks.
         await session.execute(delete(Chunk).where(Chunk.document_id == message.document_id, Chunk.workspace_id == message.workspace_id))
         session.add_all(db_chunks)
+        doc.active_version = message.document_version
         doc.status, doc.pipeline_stage, doc.progress, doc.attempts = "indexed", "complete", 100, message.attempt
+        doc.index_runs += 1
         doc.content_hash, doc.error_message = content_hash, None
         doc.doc_metadata = {**message.metadata, "ingestion": loader_metadata, "document_version": message.document_version}
         await session.commit()
@@ -142,6 +149,30 @@ async def _schedule_retry(message: IngestionMessage, error: Exception) -> None:
         await session.commit()
 
 
+async def _handle_malformed_record(producer: AIOKafkaProducer, raw_value: bytes, error: Exception) -> bool:
+    try:
+        await _publish_malformed_event(producer, raw_value, error)
+        return True
+    except Exception:
+        logger.exception("Unable to durably quarantine malformed Kafka event")
+        return False
+
+
+async def _handle_processing_failure(producer: AIOKafkaProducer, redis: Redis, message: IngestionMessage, error: Exception) -> bool:
+    try:
+        if message.attempt < settings.max_retries:
+            retry = message.model_copy(update={"attempt": message.attempt + 1})
+            await _state(redis, retry, status="retrying", stage="retry_scheduled", progress=0, error=str(error))
+            await _schedule_retry(message, error)
+        else:
+            await _state(redis, message, status="failed", stage="dead_lettered", progress=0, error=str(error))
+            await _publish(producer, settings.kafka_dlq_topic, message)
+        return True
+    except Exception:
+        logger.exception("Unable to make failed Kafka event durable")
+        return False
+
+
 async def _consume_kafka() -> None:
     consumer = AIOKafkaConsumer(settings.kafka_ingest_topic, settings.kafka_retry_topic, bootstrap_servers=settings.kafka_bootstrap_servers,
         group_id=settings.kafka_consumer_group, enable_auto_commit=False, auto_offset_reset="earliest",
@@ -153,26 +184,18 @@ async def _consume_kafka() -> None:
         async for record in consumer:
             try:
                 message = IngestionMessage.model_validate_json(record.value)
-                await process_message(message.model_dump(mode="json"), redis)
-            except Exception as exc:
+            except Exception as parse_error:
+                durable = await _handle_malformed_record(producer, record.value, parse_error)
+            else:
                 try:
-                    failed = IngestionMessage.model_validate_json(record.value)
-                    if failed.attempt < settings.max_retries:
-                        retry = failed.model_copy(update={"attempt": failed.attempt + 1})
-                        await _state(redis, retry, status="retrying", stage="retry_scheduled", progress=0, error=str(exc))
-                        await _schedule_retry(failed, exc)
-                    else:
-                        await _state(redis, failed, status="failed", stage="dead_lettered", progress=0, error=str(exc))
-                        await _publish(producer, settings.kafka_dlq_topic, failed)
-                except Exception as handling_error:
-                    # A malformed payload has no job id/version to retry. Send
-                    # a small, non-sensitive diagnostic record to the DLQ so it
-                    # cannot poison the partition forever.
-                    try:
-                        await _publish_malformed_event(producer, record.value, handling_error)
-                    except Exception:
-                        logger.exception("Unable to make failed Kafka event durable")
-                        continue  # Do not commit: Kafka will replay the original event.
+                    await process_message(message.model_dump(mode="json"), redis)
+                    durable = True
+                except Exception as processing_error:
+                    durable = await _handle_processing_failure(producer, redis, message, processing_error)
+            if not durable:
+                # Do not fetch another record: committing a later record from
+                # this partition would also advance past this unhandled one.
+                raise RuntimeError("Kafka failure could not be made durable")
             await consumer.commit()
     finally:
         await consumer.stop(); await producer.stop(); await redis.aclose()

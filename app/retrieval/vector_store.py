@@ -7,6 +7,7 @@ from qdrant_client.models import (
     MatchValue,
     PayloadSchemaType,
     PointStruct,
+    PointIdsList,
     VectorParams,
 )
 
@@ -77,6 +78,13 @@ async def delete_obsolete_document_vectors(document_id: str, workspace_id: str, 
         )),
         wait=True,
     )
+
+
+async def delete_chunk_vectors(chunk_ids: list[str]) -> None:
+    if not chunk_ids:
+        return
+    await ensure_collection()
+    await client.delete(collection_name=COLLECTION, points_selector=PointIdsList(points=chunk_ids), wait=True)
 
 
 async def search_vectors(vector: list[float], top_k: int, filters: dict | None = None, workspace_id: str | None = None):

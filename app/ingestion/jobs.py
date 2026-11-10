@@ -52,7 +52,11 @@ async def enqueue_ingestion(payload: IngestRequest, workspace_id: str) -> Enqueu
             job_id, version = existing.id, existing.version + 1
             existing.version = version
             existing.external_id, existing.source, existing.content_type = payload.external_id, payload.source, payload.content_type.value
-            existing.status, existing.pipeline_stage, existing.progress, existing.attempts = "queued", "accepted", 0, 0
+            # Keep an indexed generation visible while its replacement is
+            # loading and embedding. New documents have no active generation.
+            existing.status = "indexed" if existing.active_version else "queued"
+            existing.pipeline_stage, existing.progress, existing.attempts = (
+                "reindex_accepted" if existing.active_version else "accepted"), 0, 0
             existing.error_message, existing.deleted_at, existing.doc_metadata = None, None, dict(payload.metadata)
         else:
             version = 1

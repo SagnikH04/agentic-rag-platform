@@ -39,7 +39,7 @@ async def _sparse_candidates(question: str, workspace_id: str, limit: int) -> di
     rank = func.ts_rank_cd(document, tsquery)
     async with SessionLocal() as session:
         rows = (await session.execute(select(Chunk.id, rank.label("rank")).join(Document, Chunk.document_id == Document.id)
-            .where(Document.workspace_id == workspace_id, Document.status == "indexed", document.op("@@")(tsquery))
+            .where(Document.workspace_id == workspace_id, Document.status == "indexed", Chunk.document_version == Document.active_version, document.op("@@")(tsquery))
             .order_by(rank.desc()).limit(limit))).all()
     return {chunk_id: float(score) for chunk_id, score in rows}
 
@@ -49,7 +49,7 @@ async def _hydrate(chunk_ids: set[str], workspace_id: str, filters: dict) -> dic
         return {}
     async with SessionLocal() as session:
         rows = (await session.execute(select(Chunk, Document).join(Document, Chunk.document_id == Document.id).where(
-            Chunk.workspace_id == workspace_id, Chunk.id.in_(chunk_ids), Document.status == "indexed"))).all()
+            Chunk.workspace_id == workspace_id, Chunk.id.in_(chunk_ids), Document.status == "indexed", Chunk.document_version == Document.active_version))).all()
     result = {}
     for chunk, document in rows:
         metadata = {**(document.doc_metadata or {}), **(chunk.chunk_metadata or {})}

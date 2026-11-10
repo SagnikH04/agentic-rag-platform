@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     retry_max_seconds: int = 300
     retry_poll_seconds: float = 1.0
     outbox_poll_seconds: float = 1.0
+    reconciliation_poll_seconds: float = 60.0
     worker_max_poll_interval_ms: int = 1_800_000
     cors_origins: str = "http://localhost:5173,http://localhost:8000"
 
