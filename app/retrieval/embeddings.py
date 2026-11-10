@@ -1,15 +1,21 @@
 import asyncio
 import json
 from functools import lru_cache
-
-from sentence_transformers import SentenceTransformer
+from typing import TYPE_CHECKING
 
 from app.core.config import settings
 from app.core.cache import embedding_key, redis_client
 
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
 
 @lru_cache(maxsize=1)
-def model() -> SentenceTransformer:
+def model() -> "SentenceTransformer":
+    # Keep API/test startup independent from the heavyweight Torch stack. The
+    # embedding model is loaded only by an indexing or dense-retrieval call.
+    from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(settings.embedding_model)
 
 
